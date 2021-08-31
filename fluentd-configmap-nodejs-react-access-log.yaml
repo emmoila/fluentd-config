@@ -1,0 +1,76 @@
+# Sample log format
+# 192.168.172.10 - - [24/Aug/2021:09:51:32 +0000] "GET /static/js/main.brtyui2334.js HTTP/1.1" 200 735973 "http://google.com" "Mozilla/5.0 Safari/537.36" "53.23.45.23"
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: fluentd-configmap
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+data:
+  system.conf: |-
+    <system>
+      root_dir /tmp/fluentd-buffers/
+    </system>
+
+containers.input.conf: |-
+  # Access logs
+  <source>
+    @id nodejs-access.log
+    @type tail
+    path /var/log/containers/nodejs*.log
+    pos_file /var/log/nodejs-access.log.pos
+    tag raw.k8s.nodejs-access.*
+    read_from_head true
+    <parse>
+      @type json
+    </parse>
+  </source>
+
+  # Detect exceptions in the log output and forward them as one log entry.
+  <match raw.k8s.**>
+    @id raw.kubernetes
+    @type detect_exceptions
+    remove_tag_prefix raw
+    message log
+    stream stream
+    multiline_flush_interval 5
+    max_bytes 500000
+    max_lines 1000
+  </match>
+
+  # Exclude the health check access logs
+  <filter k8s.**>
+    @type grep
+    <exclude>
+      key log
+      pattern /health/
+    </exclude>
+  </filter>
+
+    # Enriches records with Kubernetes metadata
+    <filter k8s.**>
+      @id filter_kubernetes_metadata
+      @type kubernetes_metadata
+    </filter>
+
+    # Parse the log field
+   <filter k8s.nodejs-access.**>
+     @id filter_parser_nodejs-access
+     @type parser
+     key_name log
+     reserve_data true
+     remove_key_name_field true
+     <parse>
+       @type regexp
+       expression /^(?<remote-addr>[^ ]*) [^ ]* (?<user>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<status-code>[^ ]*) (?<size>[^ ]*) "(?<referer>[^\"]*)" "(?<agent>[^\"]*)" "(?<X-Forwarded-For>[^\"]*)"?$/
+       time_key time
+       time_format %d/%b/%Y:%H:%M:%S %z
+       keep_time_key true
+     </parse>
+   </filter>
+
+   # Output
+   <match pattern>
+    @type stdout
+  </match>
