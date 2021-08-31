@@ -71,6 +71,6 @@ containers.input.conf: |-
    </filter>
 
    # Output
-   <match pattern>
+   <match k8s.nodejs-access.**>
     @type stdout
   </match>

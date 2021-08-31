@@ -1,0 +1,97 @@
+# Sample log format
+# Single line
+# 2021-08-29 00:00:00.062  INFO 1 --- [main] c.c.s.profiler : application working
+# Multiline java error stack trace
+# 2021-08-29 00:00:00.475 ERROR 1 --- [main] c.c.s.profiler : error while checking api
+#   java.lang.NullPointerException: null
+#   at sun.awt.FontConfiguration.getVersion(FontConfiguration.java:1264)
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: fluentd-configmap
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+data:
+  system.conf: |-
+    <system>
+      root_dir /tmp/fluentd-buffers/
+    </system>
+
+containers.input.conf: |-
+  # Java springboot application logs
+  <source>
+    @id java-springboot.log
+    @type tail
+    path /var/log/containers/springboot*.log
+    pos_file /var/log/java-springboot.log.pos
+    tag raw.k8s.java-springboot.*
+    read_from_head true
+    <parse>
+      @type json
+    </parse>
+  </source>
+
+  # Detect exceptions in the log output and forward them as one log entry.
+  <match raw.k8s.**>
+    @id raw.kubernetes
+    @type detect_exceptions
+    remove_tag_prefix raw
+    message log
+    stream stream
+    multiline_flush_interval 5
+    max_bytes 500000
+    max_lines 1000
+  </match>
+
+  # Exclude the health check access logs
+  <filter k8s.**>
+    @type grep
+    <exclude>
+      key log
+      pattern /health/
+    </exclude>
+  </filter>
+
+    # Enriches records with Kubernetes metadata
+    <filter k8s.**>
+      @id filter_kubernetes_metadata
+      @type kubernetes_metadata
+    </filter>
+
+    # Concatenate Java error log stack trace
+    <filter k8s.java-springboot.**>
+     @id filter_concat
+     @type concat
+     key log
+     multiline_start_regexp /^(\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{1,2}:\d{1,2}.\d{0,3})/
+     flush_interval 1
+     timeout_label "@NORMAL"
+    </filter>
+
+    <match k8s.java-springboot.**>
+      @type relabel
+      @label @NORMAL
+    </match>
+
+     # Parse the log field
+     <label @NORMAL>
+       <filter k8s.java-springboot.**>
+        @id filter_parser_java-springboot
+        @type parser
+        key_name log
+        reserve_data true
+        remove_key_name_field true
+        <parse>
+          @type regexp
+          expression /^(?<time>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+(?<log-level>\w+)\s+(?<process-id>\w+)\s+---\s+\[(?<thread-name>[^\]]*)\]\s+(?<logger-name>[^ ]*)\s+:\s+(?<message>.*)/m
+          time_key time
+          time_format %Y-%m-%d %H:%M:%S
+          keep_time_key true
+        </parse>
+      </filter>
+
+      <match k8s.java-springboot.**>
+        @type stdout
+      </match>
+     </label>
