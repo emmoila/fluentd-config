@@ -1,0 +1,250 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: fluentd-es-config-v0.1.4
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+data:
+  system.conf: |-
+    <system>
+      root_dir /tmp/fluentd-buffers/
+    </system>
+
+  containers.input.conf: |-
+    <source>
+      @id project1-svc.log
+      @type tail
+      path /var/log/containers/project1-svc*.log
+      pos_file /var/log/project1-svc.log.pos
+      tag raw.k8s.project1-svc.*
+      read_from_head true
+      <parse>
+        @type json
+        # time_key time # Use "time" field for timestamp
+        # time_format %Y-%m-%dT%H:%M:%S.%NZ
+        # keep_time_key true
+      </parse>
+    </source>
+
+    <source>
+      @id camunda.log
+      @type tail
+      path /var/log/containers/camunda*.log
+      pos_file /var/log/camunda.pos
+      tag project1-camunda.*
+      read_from_head true
+      <parse>
+        @type json
+      </parse>
+    </source>
+
+    # <source>
+    #   @id camunda.log
+    #   @type tail
+    #   path /var/log/containers/poc-camunda*.log
+    #   pos_file /var/log/camunda.log.pos
+    #   tag raw.k8s.camunda.*
+    #   read_from_head true
+    #   <parse>
+    #     @type json
+    #   </parse>
+    # </source>
+
+    # Detect exceptions in the log output and forward them as one log entry.
+    <match raw.**>
+      @id raw.kubernetes
+      @type detect_exceptions
+      remove_tag_prefix raw
+      message log
+      stream stream
+      multiline_flush_interval 5
+      max_bytes 500000
+      max_lines 1000
+    </match>
+
+    # Exclude the health check access logs
+    <filter k8s.**>
+      @type grep
+      <exclude>
+        key log
+        pattern /health/
+      </exclude>
+    </filter>
+
+    # # Include only access log of camunda
+    # <filter k8s.camunda.**>
+    #   @type grep
+    #   <regexp>
+    #     key log
+    #     pattern /^access-log/
+    #   </regexp>
+    # </filter>
+
+    # Enriches records with Kubernetes metadata
+    <filter k8s.**>
+      @id filter_kubernetes_metadata
+      @type kubernetes_metadata
+    </filter>
+
+     # Parse the log field as Json
+    <filter k8s.project1-svc.**>
+      @id filter_parser
+      @type parser
+      key_name log
+      reserve_data true
+      remove_key_name_field true
+      <parse>
+        @type json
+        time_key time # Use "time" field from log for timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+        keep_time_key true
+      </parse>
+    </filter>
+
+    # # Parse the camunda access log
+    # <filter k8s.camunda.**>
+    #   @id filter_parser_camunda
+    #   @type parser
+    #   key_name log
+    #   reserve_data true
+    #   remove_key_name_field true
+    #   <parse>
+    #   @type regexp
+    #     expression /^(?<log_type>[^ ]*) (?<name>[^ ]*) (?<source-app>[^ ]*) (?<host>[^ ]*) (?<logical-user>[^ ]*) (?<user>[^ ]*) (?<thread>[^ ]*) \[(?<time>[^\]]*)\] "(?<method>\S+)(?: +(?<path>[^ ]*) +\S*)?" (?<status-code>[^ ]*) (?<size>[^ ]*) (?<response-time>[^\\n]*)/
+    #     time_key time
+    #     time_format %d/%b/%Y:%H:%M:%S %z
+    #     keep_time_key true
+    #   </parse>
+    # </filter>
+
+    <filter k8s.**>
+      @id filter_test_stream
+      @type record_transformer
+      remove_keys stream
+    </filter>
+
+    ### Config for Camunda logs
+    <filter project1-camunda.**>
+      @type grep
+      <regexp>
+        key log
+        pattern /ae.project1.event.handler.EventHandler.handleEvent/
+      </regexp>
+    </filter>
+
+    <filter project1-camunda.**>
+      @type record_transformer
+      remove_keys stream,time
+    </filter>
+
+    <filter project1-camunda.**>
+      @id filter_parser_camunda
+      @type parser
+      key_name log
+      reserve_data true
+      remove_key_name_field true
+      <parse>
+      @type regexp
+        expression /^(?<skip1>[^ ]*) (?<skip2>[^ ]*) (?<skip3>[^ ]*) (?<skip4>[^ ]*) (?<skip5>[^ ]*) (?<main>[^()]*)/
+      </parse>
+    </filter>
+
+    <filter project1-camunda.**>
+      @type record_transformer
+      remove_keys skip1,skip2,skip3,skip4,skip5
+    </filter>
+
+    <filter project1-camunda.**>
+      @id filter_parser_camunda_json
+      @type parser
+      key_name main
+      reserve_data true
+      remove_key_name_field true
+      <parse>
+       @type json
+       time_key time # Use "time" field from log for timestamp
+       time_format %Y-%m-%dT%H:%M:%S.%NZ
+       keep_time_key true
+      </parse>
+    </filter>
+
+    <filter project1-camunda.**>
+      @id camunda_kubernetes_metadata
+      @type kubernetes_metadata
+    </filter>
+
+    <match project1-camunda.**>
+      @id elasticsearch-camunda
+      @type elasticsearch
+      @log_level info
+      log_es_400_reason true
+      include_tag_key true
+      validate_client_version true
+      hosts {{ .Values.ELASTICSEARCH_HOST }}
+      scheme {{ .Values.ELASTICSEARCH_SCHEME }}
+      {{- if eq .Values.security "enabled"}}
+      user {{ .Values.ELASTICSEARCH_USERNAME }}
+      password {{ .Values.ELASTICSEARCH_PASSWORD }}
+      ssl_verify {{ .Values.ELASTICSEARCH_SSL_VERIFY }}
+      ssl_version TLSv1_2
+      {{- end}}
+      logstash_format true
+      logstash_prefix project1-camunda
+      logstash_dateformat %Y.%W
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      request_timeout 40s
+      <buffer tag>
+        @type file
+        path /var/log/fluentd-buffers/kubernetes.system.buffer.0
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 10s
+        retry_forever
+        retry_max_interval 30
+        chunk_limit_size 8M
+        queue_limit_length 8
+        overflow_action block
+      </buffer>
+    </match>
+    ### Config for Camunda logs
+
+    # Elasticsearch - common
+    <match k8s.**>
+      @id elasticsearch-common
+      @type elasticsearch
+      @log_level debug
+      log_es_400_reason true
+      include_tag_key true
+      validate_client_version true
+      hosts {{ .Values.ELASTICSEARCH_HOST }}
+      scheme {{ .Values.ELASTICSEARCH_SCHEME }}
+      {{- if eq .Values.security "enabled"}}
+      user {{ .Values.ELASTICSEARCH_USERNAME }}
+      password {{ .Values.ELASTICSEARCH_PASSWORD }}
+      ssl_verify {{ .Values.ELASTICSEARCH_SSL_VERIFY }}
+      ssl_version TLSv1_2
+      {{- end}}
+      logstash_format true
+      logstash_prefix project1-svc-${name}-${log_type}
+      logstash_dateformat %Y.%W
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      request_timeout 40s
+      <buffer tag, name, log_type>
+        @type file
+        path /var/log/fluentd-buffers/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 6
+        flush_interval 60s
+        retry_forever
+        retry_max_interval 60
+        chunk_limit_size 256M
+        queue_limit_length 8
+        overflow_action block
+      </buffer>
+    </match>
